@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fabsim · Virtual Oxidation Furnace &amp; Diffusion Lab</title>
+<meta name="description" content="Interactive silicon process simulator: Deal-Grove oxidation with physically computed wafer colour, and two-step dopant diffusion with junction depth and sheet resistance.">
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --warm:#f0883e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header { padding:28px 24px 8px; max-width:1100px; margin:auto; }
+  header h1 { margin:0; font-size:1.6rem; }
+  header p { margin:4px 0 0; color:var(--muted); }
+  header a { color:var(--accent); }
+  .tabs { max-width:1100px; margin:16px auto 0; padding:0 24px; display:flex; gap:8px; }
+  .tabs button { background:none; border:1px solid var(--line); color:var(--muted); padding:8px 16px; border-radius:8px 8px 0 0; cursor:pointer; font:inherit; }
+  .tabs button.on { background:var(--panel); color:var(--text); border-bottom-color:var(--panel); }
+  main { max-width:1100px; margin:auto; padding:0 24px 40px; }
+  .lab { display:none; background:var(--panel); border:1px solid var(--line); border-radius:0 10px 10px 10px; padding:20px; }
+  .lab.on { display:grid; grid-template-columns:300px 1fr; gap:24px; }
+  @media (max-width:820px){ .lab.on { grid-template-columns:1fr; } }
+  label { display:block; margin:12px 0 2px; color:var(--muted); font-size:.85rem; }
+  label b { color:var(--text); font-weight:600; float:right; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  select { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px; font:inherit; }
+  fieldset { border:1px solid var(--line); border-radius:8px; margin:12px 0 0; padding:4px 12px 12px; }
+  legend { color:var(--warm); font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; }
+  .out { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+  .kpi { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .kpi span { display:block; color:var(--muted); font-size:.78rem; }
+  .kpi strong { font-size:1.35rem; font-variant-numeric:tabular-nums; }
+  canvas { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:8px; display:block; }
+  .row { display:flex; gap:16px; align-items:center; margin-bottom:14px; }
+  #wafer { width:150px; height:150px; flex:none; border-radius:50%; position:relative; box-shadow:0 0 0 3px #222 inset, 0 8px 30px rgba(0,0,0,.5); }
+  #wafer::after { content:""; position:absolute; bottom:4px; left:50%; width:40px; margin-left:-20px; height:4px; background:var(--panel); }
+  .note { color:var(--muted); font-size:.82rem; margin-top:10px; }
+  footer { max-width:1100px; margin:auto; padding:0 24px 30px; color:var(--muted); font-size:.85rem; }
+  footer a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Virtual Oxidation Furnace &amp; Diffusion Lab</h1>
+  <p>Silicon process physics in the browser: Deal-Grove oxidation, thin-film optics, Fick's law. Part of
+    <a href="https://github.com/DSTX28/fabsim">fabsim</a>, where every model is validated against published data.</p>
+</header>
+<nav class="tabs">
+  <button class="on" data-tab="ox">Oxidation furnace</button>
+  <button data-tab="dif">Two-step diffusion</button>
+</nav>
+<main>
+  <section class="lab on" id="ox">
+    <div>
+      <fieldset><legend>Furnace recipe</legend>
+        <label>Temperature <b id="vT"></b></label><input type="range" id="T" min="700" max="1200" step="10" value="1000">
+        <label>Time <b id="vt"></b></label><input type="range" id="t" min="0" max="1000" value="560">
+        <label>Ambient</label><select id="amb"><option value="wet">Wet (H₂O / pyrogenic steam)</option><option value="dry">Dry O₂</option></select>
+        <label>Wafer orientation</label><select id="ori"><option value="100">&lt;100&gt;</option><option value="111">&lt;111&gt;</option></select>
+        <label>Starting oxide <b id="vxi"></b></label><input type="range" id="xi" min="0" max="500" step="5" value="0">
+      </fieldset>
+      <p class="note">Wet oxidation grows ~10× faster: water is far more soluble in SiO₂ than O₂. &lt;100&gt; wafers grow slower than &lt;111&gt; in the linear regime because they have fewer surface bonds available to react.</p>
+    </div>
+    <div>
+      <div class="row">
+        <div id="wafer" title="Wafer colour computed from thin-film interference"></div>
+        <div class="out" style="flex:1">
+          <div class="kpi"><span>Oxide thickness</span><strong id="oxT"></strong></div>
+          <div class="kpi"><span>Si consumed</span><strong id="oxSi"></strong></div>
+          <div class="kpi"><span>Growth regime</span><strong id="oxReg"></strong></div>
+          <div class="kpi"><span>B / (B/A)</span><strong id="oxK" style="font-size:1rem"></strong></div>
+        </div>
+      </div>
+      <canvas id="cGrow" height="260"></canvas>
+      <canvas id="cChart" height="70" style="margin-top:10px"></canvas>
+      <p class="note">Colour is computed, not looked up: normal-incidence reflectance of air/SiO₂/Si (Sellmeier SiO₂, tabulated Si n&nbsp;&amp;&nbsp;k), weighted by a daylight spectrum and the CIE 1931 colour-matching functions, then converted to sRGB.</p>
+    </div>
+  </section>
+
+  <section class="lab" id="dif">
+    <div>
+      <fieldset><legend>Substrate</legend>
+        <label>Type</label><select id="sub"><option value="n">n-type (phosphorus-doped)</option><option value="p">p-type (boron-doped)</option></select>
+        <label>Background doping <b id="vNb"></b></label><input type="range" id="Nb" min="14" max="17" step="0.1" value="15">
+      </fieldset>
+      <fieldset><legend>Step 1 · Predeposition (constant source)</legend>
+        <label>Temperature <b id="vT1"></b></label><input type="range" id="T1" min="850" max="1100" step="5" value="950">
+        <label>Time <b id="vt1"></b></label><input type="range" id="t1" min="5" max="120" step="5" value="30">
+        <label>Surface concentration C<sub>s</sub> <b id="vCs"></b></label><input type="range" id="Cs" min="18" max="21" step="0.1" value="20">
+      </fieldset>
+      <fieldset><legend>Step 2 · Drive-in (limited source)</legend>
+        <label>Temperature <b id="vT2"></b></label><input type="range" id="T2" min="900" max="1200" step="5" value="1100">
+        <label>Time <b id="vt2"></b></label><input type="range" id="t2" min="0" max="300" step="5" value="60">
+      </fieldset>
+    </div>
+    <div>
+      <div class="out">
+        <div class="kpi"><span>Dopant</span><strong id="dDop"></strong></div>
+        <div class="kpi"><span>Dose Q</span><strong id="dQ"></strong></div>
+        <div class="kpi"><span>Junction depth x<sub>j</sub></span><strong id="dXj"></strong></div>
+        <div class="kpi"><span>Sheet resistance</span><strong id="dRs"></strong></div>
+        <div class="kpi"><span>4-pt probe V at 1 mA</span><strong id="dV"></strong></div>
+      </div>
+      <canvas id="cProf" height="340"></canvas>
+      <p class="note">Analytic two-step model: erfc predeposition, then Gaussian drive-in of the predeposited dose. Sheet resistance integrates Caughey-Thomas mobility over the layer. The Python package solves the same problem numerically, with oxidation and multiple steps.</p>
+    </div>
+  </section>
+</main>
+<footer>Built by Daniel Shaheen · Electrical Engineering (Micro &amp; Nano Devices), Texas State University ·
+  <a href="https://github.com/DSTX28/fabsim">source &amp; validation tests</a> · <a href="https://dstx28.github.io/">portfolio</a></footer>
+
+<script>
+"use strict";
+const kB = 8.617333262e-5, q = 1.602176634e-19;
+
+/* ---------- oxidation (Deal-Grove 1965) ---------- */
+const DG = { dry:{C1:7.72e2,E1:1.23,C2:6.23e6,E2:2.00}, wet:{C1:3.86e2,E1:0.78,C2:1.63e8,E2:2.05} };
+const ORI = { "100":1/1.68, "111":1 };
+function rates(T, amb, ori){ const p=DG[amb], kT=kB*(T+273.15);
+  return { B:p.C1*Math.exp(-p.E1/kT), BA:p.C2*Math.exp(-p.E2/kT)*ORI[ori] }; }
+function oxide(min, T, amb, ori, xi){ const {B,BA}=rates(T,amb,ori), A=B/BA;
+  const x0 = amb==="dry" ? Math.max(xi,0.025) : xi;
+  const tau=(x0*x0+A*x0)/B, t=min/60+tau;
+  return A/2*(Math.sqrt(1+4*B*t/(A*A))-1); }
+
+/* ---------- optics: air / SiO2 / Si ---------- */
+const WL=[]; for(let w=400; w<=700; w+=5) WL.push(w);
+const SI=[[400,5.57,.387],[450,4.67,.14],[500,4.30,.07],[550,4.08,.04],[600,3.94,.02],[650,3.85,.016],[700,3.78,.011]];
+const interp=(x,tab,col)=>{ for(let i=0;i<tab.length-1;i++){ if(x<=tab[i+1][0]){ const f=(x-tab[i][0])/(tab[i+1][0]-tab[i][0]); return tab[i][col]+f*(tab[i+1][col]-tab[i][col]); } } return tab[tab.length-1][col]; };
+function nSiO2(w){ const l2=(w/1000)**2; return Math.sqrt(1+.6961663*l2/(l2-.0684043**2)+.4079426*l2/(l2-.1162414**2)+.8974794*l2/(l2-9.896161**2)); }
+// complex helpers [re, im]
+const cadd=(a,b)=>[a[0]+b[0],a[1]+b[1]], cmul=(a,b)=>[a[0]*b[0]-a[1]*b[1],a[0]*b[1]+a[1]*b[0]];
+const cdiv=(a,b)=>{const d=b[0]*b[0]+b[1]*b[1]; return [(a[0]*b[0]+a[1]*b[1])/d,(a[1]*b[0]-a[0]*b[1])/d];};
+function reflect(dnm, w){ const n1=nSiO2(w), n2=[interp(w,SI,1),-interp(w,SI,2)];
+  const r01=[(1-n1)/(1+n1),0], r12=cdiv([n1-n2[0],-n2[1]],[n1+n2[0],n2[1]]);
+  const ph=-2*(2*Math.PI*n1*dnm/w), e=[Math.cos(ph),Math.sin(ph)];
+  const num=cadd(r01,cmul(r12,e)), den=cadd([1,0],cmul(cmul(r01,r12),e)), r=cdiv(num,den);
+  return r[0]*r[0]+r[1]*r[1]; }
+const lobe=(w,m,s1,s2)=>{const s=w<m?s1:s2; return Math.exp(-.5*((w-m)/s)**2);};
+const cmf=w=>[1.056*lobe(w,599.8,37.9,31)+.362*lobe(w,442,16,26.7)-.065*lobe(w,501.1,20.4,26.2),
+              .821*lobe(w,568.8,46.9,40.5)+.286*lobe(w,530.9,16.3,31.1),
+              1.217*lobe(w,437,11.8,36)+.681*lobe(w,459,26,13.8)];
+const bb=w=>{const l=w*1e-9; return 1/(l**5*(Math.exp(6.62607015e-34*2.99792458e8/(l*1.380649e-23*6504))-1));};
+const M=[[3.2406,-1.5372,-.4986],[-.9689,1.8758,.0415],[.0557,-.2040,1.0570]];
+const toRGB=xyz=>M.map(r=>r[0]*xyz[0]+r[1]*xyz[1]+r[2]*xyz[2]);
+function xyzOf(f){ const s=[0,0,0]; for(const w of WL){ const c=cmf(w), e=bb(w)*f(w); s[0]+=c[0]*e; s[1]+=c[1]*e; s[2]+=c[2]*e; } return s; }
+const WHITE=toRGB(xyzOf(()=>1));
+const gam=c=>{c=Math.min(1,Math.max(0,c)); return c<=.0031308?12.92*c:1.055*c**(1/2.4)-.055;};
+function oxColor(dnm){ const rgb=toRGB(xyzOf(w=>reflect(dnm,w))); return rgb.map((c,i)=>Math.round(255*gam(1.6*c/WHITE[i]))); }
+const css=c=>`rgb(${c[0]},${c[1]},${c[2]})`;
+
+/* ---------- diffusion & electrical ---------- */
+const DIFF={B:[.76,3.46],P:[3.85,3.66]};
+const Dcm2s=(d,T)=>DIFF[d][0]*Math.exp(-DIFF[d][1]/(kB*(T+273.15)));
+function erfc(x){ // Abramowitz-Stegun 7.1.26, |err| < 1.5e-7
+  const t=1/(1+.3275911*Math.abs(x)); const y=t*(.254829592+t*(-.284496736+t*(1.421413741+t*(-1.453152027+t*1.061405429))))*Math.exp(-x*x);
+  return x>=0?y:2-y; }
+const CT={n:[68.5,1414,9.2e16,.711], p:[44.9,470.5,2.23e17,.719]};
+const mob=(N,c)=>{const p=CT[c]; return p[0]+(p[1]-p[0])/(1+(N/p[2])**p[3]);};
+
+/* ---------- plotting ---------- */
+function setupCanvas(cv){ const r=window.devicePixelRatio||1, w=cv.clientWidth, h=+cv.getAttribute("height");
+  cv.width=w*r; cv.height=h*r; cv.style.height=h+"px"; const g=cv.getContext("2d"); g.setTransform(r,0,0,r,0,0); return [g,w,h]; }
+function axes(g,w,h,o){ const L=58,R=14,T=14,Bm=36, pw=w-L-R, ph=h-T-Bm;
+  const X=v=>L+pw*(o.xlog?(Math.log10(v)-Math.log10(o.x0))/(Math.log10(o.x1)-Math.log10(o.x0)):(v-o.x0)/(o.x1-o.x0));
+  const Y=v=>T+ph*(1-(o.ylog?(Math.log10(v)-Math.log10(o.y0))/(Math.log10(o.y1)-Math.log10(o.y0)):(v-o.y0)/(o.y1-o.y0)));
+  g.font="11px system-ui"; g.strokeStyle="#30363d"; g.fillStyle="#8b949e"; g.lineWidth=1;
+  for(const v of o.xt){ g.beginPath(); g.moveTo(X(v),T); g.lineTo(X(v),T+ph); g.stroke(); g.textAlign="center"; g.fillText(o.xf(v),X(v),T+ph+14); }
+  for(const v of o.yt){ g.beginPath(); g.moveTo(L,Y(v)); g.lineTo(L+pw,Y(v)); g.stroke(); g.textAlign="right"; g.fillText(o.yf(v),L-6,Y(v)+4); }
+  g.textAlign="center"; g.fillText(o.xl,L+pw/2,h-4);
+  g.save(); g.translate(12,T+ph/2); g.rotate(-Math.PI/2); g.fillText(o.yl,0,0); g.restore();
+  return {X,Y,L,T,pw,ph}; }
+const sup=e=>String(e).split("").map(c=>"⁰¹²³⁴⁵⁶⁷⁸⁹⁻"["0123456789-".indexOf(c)]).join("");
+const sci=v=>{const e=Math.floor(Math.log10(v)), m=v/10**e; return (m.toFixed(1)==="1.0"?"":m.toFixed(1)+"×")+"10"+sup(e);};
+const $=id=>document.getElementById(id);
+const fmtTime=m=>m<60?m.toFixed(m<10?1:0)+" min":(m/60).toFixed(m<600?2:1)+" h";
+
+/* ---------- oxidation lab ---------- */
+const tMin=s=>10**(s/1000*Math.log10(1200)); // slider 0..1000 -> 1 min .. 20 h
+let chartCache=null;
+function drawChart(cv, mark){ const [g,w,h]=setupCanvas(cv);
+  if(!chartCache||chartCache.length!==Math.floor(w)) { chartCache=[]; for(let i=0;i<Math.floor(w);i++) chartCache.push(css(oxColor(i/w*1000))); }
+  chartCache.forEach((c,i)=>{ g.fillStyle=c; g.fillRect(i,0,1,h-18); });
+  g.fillStyle="#8b949e"; g.font="11px system-ui"; g.textAlign="center";
+  for(let d=0; d<=1000; d+=100) g.fillText(d+(d===1000?" nm":""), Math.min(w-18,Math.max(10,d/1000*w)), h-4);
+  const x=mark/1000*w; if(mark<=1000){ g.strokeStyle="#fff"; g.lineWidth=2; g.strokeRect(x-2,1,4,h-21); } }
+function updOx(){ const T=+$("T").value, m=tMin(+$("t").value), amb=$("amb").value, ori=$("ori").value, xi=+$("xi").value/1000;
+  $("vT").textContent=T+" °C"; $("vt").textContent=fmtTime(m); $("vxi").textContent=(xi*1000).toFixed(0)+" nm";
+  const x=oxide(m,T,amb,ori,xi), {B,BA}=rates(T,amb,ori), A=B/BA, nm=x*1000;
+  $("oxT").textContent=nm<1000?nm.toFixed(0)+" nm":x.toFixed(3)+" µm";
+  $("oxSi").textContent=(0.44*(x-xi)*1000).toFixed(0)+" nm";
+  $("oxReg").textContent = x<0.3*A ? "Linear" : x>3*A ? "Parabolic" : "Transition";
+  $("oxK").textContent=`${B.toExponential(2)} µm²/h / ${BA.toExponential(2)} µm/h`;
+  $("wafer").style.background=`radial-gradient(circle at 35% 30%, rgba(255,255,255,.18), transparent 55%), ${css(oxColor(nm))}`;
+  const [g,w,h]=setupCanvas($("cGrow"));
+  const ax=axes(g,w,h,{xlog:true,ylog:true,x0:1,x1:1200,y0:5,y1:5000,xt:[1,10,60,600,1200],yt:[10,100,1000],
+    xf:v=>fmtTime(v),yf:v=>v+" nm",xl:"oxidation time",yl:"oxide thickness"});
+  const curves=[["dry","#f0883e"],["wet","#58a6ff"]];
+  for(const [a,col] of curves){ g.strokeStyle=col; g.lineWidth=a===amb?2.5:1; g.globalAlpha=a===amb?1:.45; g.beginPath();
+    for(let i=0;i<=200;i++){ const tm=10**(i/200*Math.log10(1200)), y=Math.max(5,Math.min(5000,oxide(tm,T,a,ori,xi)*1000)); i?g.lineTo(ax.X(tm),ax.Y(y)):g.moveTo(ax.X(tm),ax.Y(y)); }
+    g.stroke(); g.globalAlpha=1; g.fillStyle=col; g.textAlign="left"; g.fillText(a==="wet"?"wet":"dry",ax.L+ax.pw-28,ax.Y(Math.max(5,Math.min(5000,oxide(1100,T,a,ori,xi)*1000)))-6); }
+  if(nm>=5&&nm<=5000){ g.fillStyle="#fff"; g.beginPath(); g.arc(ax.X(m),ax.Y(nm),5,0,7); g.fill(); }
+  drawChart($("cChart"), nm); }
+
+/* ---------- diffusion lab ---------- */
+function updDif(){ const sub=$("sub").value, Nb=10**+$("Nb").value, T1=+$("T1").value, t1=+$("t1").value, Cs=10**+$("Cs").value, T2=+$("T2").value, t2=+$("t2").value;
+  const dop = sub==="n" ? "B" : "P";
+  $("vNb").textContent=sci(Nb)+" cm⁻³"; $("vT1").textContent=T1+" °C"; $("vt1").textContent=t1+" min"; $("vCs").textContent=sci(Cs)+" cm⁻³";
+  $("vT2").textContent=T2+" °C"; $("vt2").textContent=t2+" min";
+  const Dt1=Dcm2s(dop,T1)*t1*60, Dt2=Dcm2s(dop,T2)*t2*60;        // cm^2
+  const Q=2*Cs*Math.sqrt(Dt1/Math.PI);
+  const pre=x=>Cs*erfc(x*1e-4/(2*Math.sqrt(Dt1)));
+  // drive-in of the predeposited dose; the predeposition's own Dt is added so t2 = 0 is still a sensible Gaussian limit
+  const drv=x=>{ const Dt=Dt2+Dt1; return Q/Math.sqrt(Math.PI*Dt)*Math.exp(-((x*1e-4)**2)/(4*Dt)); };
+  const prof = t2>0 ? drv : pre;
+  const xj = t2>0 ? 2*Math.sqrt(Dt1+Dt2)*Math.sqrt(Math.log(prof(0)/Nb))*1e4 : (()=>{ let lo=0,hi=20; for(let i=0;i<60;i++){ const m=(lo+hi)/2; pre(m)>Nb?lo=m:hi=m; } return lo; })();
+  const car = dop==="B"?"p":"n"; let G=0; const n=800;
+  for(let i=0;i<n;i++){ const x=(i+.5)/n*xj, N=prof(x), net=N-Nb; if(net>0) G+=q*mob(N+Nb,car)*net*(xj/n*1e-4); }
+  const Rs=1/G;
+  $("dDop").textContent = dop==="B"?"Boron → p⁺n":"Phosphorus → n⁺p";
+  $("dQ").textContent=sci(Q)+" cm⁻²"; $("dXj").textContent=xj.toFixed(2)+" µm"; $("dRs").textContent=Rs.toFixed(0)+" Ω/□";
+  $("dV").textContent=(Rs*1e-3/4.532*1000).toFixed(1)+" mV";
+  const [g,w,h]=setupCanvas($("cProf")); const xmax=Math.max(0.5,Math.ceil(xj*1.6*2)/2);
+  const ax=axes(g,w,h,{ylog:true,x0:0,x1:xmax,y0:1e14,y1:1e21,xt:[...Array(6).keys()].map(i=>i*xmax/5),yt:[1e14,1e15,1e16,1e17,1e18,1e19,1e20,1e21],
+    xf:v=>v.toFixed(2),yf:v=>"10"+sup(Math.round(Math.log10(v))),xl:"depth (µm)",yl:"concentration (cm⁻³)"});
+  const line=(f,col,wd,dash)=>{ g.strokeStyle=col; g.lineWidth=wd; g.setLineDash(dash||[]); g.beginPath(); let s=false;
+    for(let i=0;i<=400;i++){ const x=i/400*xmax, y=f(x); if(y<1e14){ s=false; continue; } const Y=ax.Y(Math.min(y,1e21)); s?g.lineTo(ax.X(x),Y):g.moveTo(ax.X(x),Y); s=true; } g.stroke(); g.setLineDash([]); };
+  line(pre,"#58a6ff",1.2,[5,4]); if(t2>0) line(drv,"#58a6ff",2.5); line(()=>Nb,"#f85149",1.5);
+  g.strokeStyle="#e6edf3"; g.setLineDash([2,3]); g.beginPath(); g.moveTo(ax.X(xj),ax.T); g.lineTo(ax.X(xj),ax.T+ax.ph); g.stroke(); g.setLineDash([]);
+  g.fillStyle="#e6edf3"; g.textAlign="left"; g.fillText("xⱼ = "+xj.toFixed(2)+" µm",ax.X(xj)+6,ax.T+14);
+  g.fillStyle="#8b949e"; g.fillText("- - after predeposition   —— after drive-in   — substrate",ax.L+8,ax.T+ax.ph-8); }
+
+/* ---------- wiring ---------- */
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".tabs button,.lab").forEach(e=>e.classList.remove("on"));
+  b.classList.add("on"); $(b.dataset.tab).classList.add("on"); b.dataset.tab==="ox"?updOx():updDif(); });
+["T","t","amb","ori","xi"].forEach(i=>$(i).addEventListener("input",updOx));
+["sub","Nb","T1","t1","Cs","T2","t2"].forEach(i=>$(i).addEventListener("input",updDif));
+window.addEventListener("resize",()=>{ chartCache=null; updOx(); updDif(); });
+updOx(); updDif();
+// exposed for automated cross-checks against the Python package
+window.fabsim={oxide,oxColor,rates};
+</script>
+</body>
+</html>
